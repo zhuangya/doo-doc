@@ -1,4 +1,4 @@
 # Summary
 
-* Features
+* [Features](features.md)
 
