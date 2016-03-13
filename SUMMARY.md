@@ -5,25 +5,25 @@
 * [Links](links.md)
 * [v2.0](v20.md)
 * [Quick Start](quick-start.md)
-	- Install
-	- Basic Usage
-	- Connect to Redis
-	- Pub/Sub
-	- Handle Binary Data
-	- Pipelining
-	- Transaction
-	- Lua Scripting
-	- Transparent Key Prefixing
-	- Transforming Arguments & Replies
-	- Monitor
-	- Streamify Scanning
-	- Auto-reconnect
-	- Connection Events
-	- Offline Queue
-	- TLS Options
-	- Sentinel
-	- Cluster
-	- Native Parser
+	- [Install](doc/install.md)
+	- [Basic Usage](doc/basic-usage.md)
+	- [Connect to Redis](doc/connect.md)
+	- [Pub/Sub](doc/pubsub.md)
+	- [Handle Binary Data](doc/handle-binary-data.md)
+	- [Pipelining](doc/pipelining.md)
+	- [Transaction](doc/transaction.md)
+	- [Lua Scripting](doc/lua-scripting.md)
+	- [Transparent Key Prefixing](doc/transparent-key-prefixing.md)
+	- [Transforming Arguments & Replies](doc/transforming-arguments-and-replies.md)
+	- [Monitor](doc/monitor.md)
+	- [Streamify Scanning](doc/streamify-scanning.md)
+	- [Auto-reconnect](doc/auto-reconnect.md)
+	- [Connection Events](doc/connection-events.md)
+	- [Offline Queue](doc/offline-queue.md)
+	- [TLS Options](doc/tls-options.md)
+	- [Sentinel](doc/sentinel.md)
+	- [Cluster](doc/cluster.md)
+	- [Native Parser](doc/native-parser.md)
 * [Error Handling](error-handling.md)
 * [Running Tests](running-tests.md)
 * [Debug](debug.md)
