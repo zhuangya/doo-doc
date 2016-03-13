@@ -1,0 +1,754 @@
+# Quick Start
+
+## Install
+```shell
+$ npm install ioredis
+```
+
+## Basic Usage
+
+```javascript
+var Redis = require('ioredis');
+var redis = new Redis();
+
+redis.set('foo', 'bar');
+redis.get('foo', function (err, result) {
+  console.log(result);
+});
+
+// Or using a promise if the last argument isn't a function
+redis.get('foo').then(function (result) {
+  console.log(result);
+});
+
+// Arguments to commands are flattened, so the following are the same:
+redis.sadd('set', 1, 3, 5, 7);
+redis.sadd('set', [1, 3, 5, 7]);
+
+// All arguments are passed directly to the redis server:
+redis.set('key', 100, 'EX', 10);
+```
+
+See the `examples/` folder for more examples.
+
+## Connect to Redis
+When a new `Redis` instance is created,
+a connection to Redis will be created at the same time.
+You can specify which Redis to connect to by:
+
+```javascript
+new Redis()       // Connect to 127.0.0.1:6379
+new Redis(6380)   // 127.0.0.1:6380
+new Redis(6379, '192.168.1.1')        // 192.168.1.1:6379
+new Redis('/tmp/redis.sock')
+new Redis({
+  port: 6379,          // Redis port
+  host: '127.0.0.1',   // Redis host
+  family: 4,           // 4 (IPv4) or 6 (IPv6)
+  password: 'auth',
+  db: 0
+})
+```
+
+You can also specify connection options as a [`redis://` URL](http://www.iana.org/assignments/uri-schemes/prov/redis):
+
+```javascript
+// Connect to 127.0.0.1:6380, db 4, using password "authpassword":
+new Redis('redis://:authpassword@127.0.0.1:6380/4')
+```
+
+See [API Documentation](API.md#new_Redis) for all available options.
+
+## Pub/Sub
+
+Here is a simple example of the API for publish/subscribe.
+The following program opens two client connections.
+It subscribes to a channel with one connection
+and publishes to that channel with the other:
+
+```javascript
+var Redis = require('ioredis');
+var redis = new Redis();
+var pub = new Redis();
+redis.subscribe('news', 'music', function (err, count) {
+  // Now we are subscribed to both the 'news' and 'music' channels.
+  // `count` represents the number of channels we are currently subscribed to.
+
+  pub.publish('news', 'Hello world!');
+  pub.publish('music', 'Hello again!');
+});
+
+redis.on('message', function (channel, message) {
+  // Receive message Hello world! from channel news
+  // Receive message Hello again! from channel music
+  console.log('Receive message %s from channel %s', message, channel);
+});
+
+// There's also an event called 'messageBuffer', which is the same as 'message' except
+// it returns buffers instead of strings.
+redis.on('messageBuffer', function (channel, message) {
+  // Both `channel` and `message` are buffers.
+});
+```
+
+`PSUBSCRIBE` is also supported in a similar way:
+
+```javascript
+redis.psubscribe('pat?ern', function (err, count) {});
+redis.on('pmessage', function (pattern, channel, message) {});
+redis.on('pmessageBuffer', function (pattern, channel, message) {});
+```
+
+When a client issues a SUBSCRIBE or PSUBSCRIBE, that connection is put into a "subscriber" mode.
+At that point, only commands that modify the subscription set are valid.
+When the subscription set is empty, the connection is put back into regular mode.
+
+If you need to send regular commands to Redis while in subscriber mode, just open another connection.
+
+## Handle Binary Data
+Arguments can be buffers:
+```javascript
+redis.set('foo', new Buffer('bar'));
+```
+
+And every command has a method that returns a Buffer (by adding a suffix of "Buffer" to the command name).
+To get a buffer instead of a utf8 string:
+
+```javascript
+redis.getBuffer('foo', function (err, result) {
+  // result is a buffer.
+});
+```
+
+## Pipelining
+If you want to send a batch of commands (e.g. > 5), you can use pipelining to queue
+the commands in memory and then send them to Redis all at once. This way the performance improves by 50%~300% (See [benchmark section](#benchmark)).
+
+`redis.pipeline()` creates a `Pipeline` instance. You can call any Redis
+commands on it just like the `Redis` instance. The commands are queued in memory
+and flushed to Redis by calling the `exec` method:
+
+```javascript
+var pipeline = redis.pipeline();
+pipeline.set('foo', 'bar');
+pipeline.del('cc');
+pipeline.exec(function (err, results) {
+  // `err` is always null, and `results` is an array of responses
+  // corresponding to the sequence of queued commands.
+  // Each response follows the format `[err, result]`.
+});
+
+// You can even chain the commands:
+redis.pipeline().set('foo', 'bar').del('cc').exec(function (err, results) {
+});
+
+// `exec` also returns a Promise:
+var promise = redis.pipeline().set('foo', 'bar').get('foo').exec();
+promise.then(function (result) {
+  // result === [[null, 'OK'], [null, 'bar']]
+});
+```
+
+Each chained command can also have a callback, which will be invoked when the command
+gets a reply:
+
+```javascript
+redis.pipeline().set('foo', 'bar').get('foo', function (err, result) {
+  // result === 'bar'
+}).exec(function (err, result) {
+  // result[1][1] === 'bar'
+});
+```
+
+In addition to adding commands to the `pipeline` queue individually, you can also pass an array of commands and arguments to the constructor:
+
+```javascript
+redis.pipeline([
+  ['set', 'foo', 'bar'],
+  ['get', 'foo']
+]).exec(function () { /* ... */ });
+```
+
+
+## Transaction
+Most of the time, the transaction commands `multi` & `exec` are used together with pipeline.
+Therefore, when `multi` is called, a `Pipeline` instance is created automatically by default,
+so you can use `multi` just like `pipeline`:
+
+```javascript
+redis.multi().set('foo', 'bar').get('foo').exec(function (err, results) {
+  // results === [[null, 'OK'], [null, 'bar']]
+});
+```
+If there's a syntax error in the transaction's command chain (e.g. wrong number of arguments, wrong command name, etc),
+then none of the commands would be executed, and an error is returned:
+
+```javascript
+redis.multi().set('foo').set('foo', 'new value').exec(function (err, results) {
+  // err:
+  //  { [ReplyError: EXECABORT Transaction discarded because of previous errors.]
+  //    name: 'ReplyError',
+  //    message: 'EXECABORT Transaction discarded because of previous errors.',
+  //    command: { name: 'exec', args: [] },
+  //    previousErrors:
+  //     [ { [ReplyError: ERR wrong number of arguments for 'set' command]
+  //         name: 'ReplyError',
+  //         message: 'ERR wrong number of arguments for \'set\' command',
+  //         command: [Object] } ] }
+});
+```
+
+In terms of the interface, `multi` differs from `pipeline` in that when specifying a callback
+to each chained command, the queueing state is passed to the callback instead of the result of the command:
+
+```javascript
+redis.multi().set('foo', 'bar', function (err, result) {
+  // result === 'QUEUED'
+}).exec(/* ... */);
+```
+
+If you want to use transaction without pipeline, pass `{ pipeline: false }` to `multi`,
+and every command will be sent to Redis immediately without waiting for an `exec` invocation:
+
+```javascript
+redis.multi({ pipeline: false });
+redis.set('foo', 'bar');
+redis.get('foo');
+redis.exec(function (err, result) {
+  // result === [[null, 'OK'], [null, 'bar']]
+});
+```
+
+The constructor of `multi` also accepts a batch of commands:
+
+```javascript
+redis.multi([
+  ['set', 'foo', 'bar'],
+  ['get', 'foo']
+]).exec(function () { /* ... */ });
+```
+
+Inline transactions are supported by pipeline, which means you can group a subset of commands
+in the pipeline into a transaction:
+
+```javascript
+redis.pipeline().get('foo').multi().set('foo', 'bar').get('foo').exec().get('foo').exec();
+```
+
+## Lua Scripting
+ioredis supports all of the scripting commands such as `EVAL`, `EVALSHA` and `SCRIPT`.
+However, it's tedious to use in real world scenarios since developers have to take
+care of script caching and to detect when to use `EVAL` and when to use `EVALSHA`.
+ioredis expose a `defineCommand` method to make scripting much easier to use:
+
+```javascript
+var redis = new Redis();
+
+// This will define a command echo:
+redis.defineCommand('echo', {
+  numberOfKeys: 2,
+  lua: 'return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}'
+});
+
+// Now `echo` can be used just like any other ordinary command,
+// and ioredis will try to use `EVALSHA` internally when possible for better performance.
+redis.echo('k1', 'k2', 'a1', 'a2', function (err, result) {
+  // result === ['k1', 'k2', 'a1', 'a2']
+});
+
+// `echoBuffer` is also defined automatically to return buffers instead of strings:
+redis.echoBuffer('k1', 'k2', 'a1', 'a2', function (err, result) {
+  // result[0] === new Buffer('k1');
+});
+
+// And of course it works with pipeline:
+redis.pipeline().set('foo', 'bar').echo('k1', 'k2', 'a1', 'a2').exec();
+```
+
+If the number of keys can't be determined when defining a command, you can
+omit the `numberOfKeys` property and pass the number of keys as the first argument
+when you call the command:
+
+```javascript
+redis.defineCommand('echoDynamicKeyNumber', {
+  lua: 'return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}'
+});
+
+// Now you have to pass the number of keys as the first argument every time
+// you invoke the `echoDynamicKeyNumber` command:
+redis.echoDynamicKeyNumber(2, 'k1', 'k2', 'a1', 'a2', function (err, result) {
+  // result === ['k1', 'k2', 'a1', 'a2']
+});
+```
+
+## Transparent Key Prefixing
+This feature allows you to specify a string that will automatically be prepended
+to all the keys in a command, which makes it easier to manage your key
+namespaces.
+
+```javascript
+var fooRedis = new Redis({ keyPrefix: 'foo:' });
+fooRedis.set('bar', 'baz');  // Actually sends SET foo:bar baz
+
+fooRedis.defineCommand('echo', {
+  numberOfKeys: 2,
+  lua: 'return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}'
+});
+
+// Works well with pipelining/transaction
+fooRedis.pipeline()
+  // Sends SORT foo:list BY foo:weight_*->fieldname
+  .sort('list', 'BY', 'weight_*->fieldname')
+  // Supports custom commands
+  // Sends EVALSHA xxx foo:k1 foo:k2 a1 a2
+  .echo('k1', 'k2', 'a1', 'a2')
+  .exec()
+```
+
+## Transforming Arguments & Replies
+Most Redis commands take one or more Strings as arguments,
+and replies are sent back as a single String or an Array of Strings. However, sometimes
+you may want something different. For instance, it would be more convenient if the `HGETALL`
+command returns a hash (e.g. `{ key: val1, key2: v2 }`) rather than an array of key values (e.g. `[key1, val1, key2, val2]`).
+
+ioredis has a flexible system for transforming arguments and replies. There are two types
+of transformers, argument transformer and reply transformer:
+
+```javascript
+var Redis = require('ioredis');
+
+// Here's the built-in argument transformer converting
+// hmset('key', { k1: 'v1', k2: 'v2' })
+// or
+// hmset('key', new Map([['k1', 'v1'], ['k2', 'v2']]))
+// into
+// hmset('key', 'k1', 'v1', 'k2', 'v2')
+Redis.Command.setArgumentTransformer('hmset', function (args) {
+  if (args.length === 2) {
+    if (typeof Map !== 'undefined' && args[1] instanceof Map) {
+      // utils is a internal module of ioredis
+      return [args[0]].concat(utils.convertMapToArray(args[1]));
+    }
+    if ( typeof args[1] === 'object' && args[1] !== null) {
+      return [args[0]].concat(utils.convertObjectToArray(args[1]));
+    }
+  }
+  return args;
+});
+
+// Here's the built-in reply transformer converting the HGETALL reply
+// ['k1', 'v1', 'k2', 'v2']
+// into
+// { k1: 'v1', 'k2': 'v2' }
+Redis.Command.setReplyTransformer('hgetall', function (result) {
+  if (Array.isArray(result)) {
+    var obj = {};
+    for (var i = 0; i < result.length; i += 2) {
+      obj[result[i]] = result[i + 1];
+    }
+    return obj;
+  }
+  return result;
+});
+```
+
+There are three built-in transformers, two argument transformers for `hmset` & `mset` and
+a reply transformer for `hgetall`. Transformers for `hmset` and `hgetall` were mentioned
+above, and the transformer for `mset` is similar to the one for `hmset`:
+
+```javascript
+redis.mset({ k1: 'v1', k2: 'v2' });
+redis.get('k1', function (err, result) {
+  // result === 'v1';
+});
+
+redis.mset(new Map([['k3', 'v3'], ['k4', 'v4']]));
+redis.get('k3', function (err, result) {
+  // result === 'v3';
+});
+```
+
+## Monitor
+Redis supports the MONITOR command,
+which lets you see all commands received by the Redis server across all client connections,
+including from other client libraries and other computers.
+
+The `monitor` method returns a monitor instance.
+After you send the MONITOR command, no other commands are valid on that connection. ioredis will emit a monitor event for every new monitor message that comes across.
+The callback for the monitor event takes a timestamp from the Redis server and an array of command arguments.
+
+Here is a simple example:
+
+```javascript
+redis.monitor(function (err, monitor) {
+  monitor.on('monitor', function (time, args) {
+  });
+});
+```
+
+## Streamify Scanning
+Redis 2.8 added the `SCAN` command to incrementally iterate through the keys in the database. It's different from `KEYS` in that
+`SCAN` only returns a small number of elements each call, so it can be used in production without the downside
+of blocking the server for a long time. However, it requires recording the cursor on the client side each time
+the `SCAN` command is called in order to iterate through all the keys correctly. Since it's a relatively common use case, ioredis
+provides a streaming interface for the `SCAN` command to make things much easier. A readable stream can be created by calling `scanStream`:
+
+```javascript
+var redis = new Redis();
+// Create a readable stream (object mode)
+var stream = redis.scanStream();
+var keys = [];
+stream.on('data', function (resultKeys) {
+  // `resultKeys` is an array of strings representing key names
+  for (var i = 0; i < resultKeys.length; i++) {
+    keys.push(resultKeys[i]);
+  }
+});
+stream.on('end', function () {
+  console.log('done with the keys: ', keys);
+});
+```
+
+`scanStream` accepts an option, with which you can specify the `MATCH` pattern and the `COUNT` argument:
+
+```javascript
+var stream = redis.scanStream({
+  // only returns keys following the pattern of `user:*`
+  match: 'user:*',
+  // returns approximately 100 elements per call
+  count: 100
+});
+```
+
+Just like other commands, `scanStream` has a binary version `scanBufferStream`, which returns an array of buffers. It's useful when
+the key names are not utf8 strings.
+
+There are also `hscanStream`, `zscanStream` and `sscanStream` to iterate through elements in a hash, zset and set. The interface of each is
+similar to `scanStream` except the first argument is the key name:
+
+```javascript
+var stream = redis.hscanStream('myhash', {
+  match: 'age:??'
+});
+```
+
+You can learn more from the [Redis documentation](http://redis.io/commands/scan).
+
+## Auto-reconnect
+By default, ioredis will try to reconnect when the connection to Redis is lost
+except when the connection is closed manually by `redis.disconnect()` or `redis.quit()`.
+
+It's very flexible to control how long to wait to reconnect after disconnection
+using the `retryStrategy` option:
+
+```javascript
+var redis = new Redis({
+  // This is the default value of `retryStrategy`
+  retryStrategy: function (times) {
+    var delay = Math.min(times * 2, 2000);
+    return delay;
+  }
+});
+```
+
+`retryStrategy` is a function that will be called when the connection is lost.
+The argument `times` means this is the nth reconnection being made and
+the return value represents how long (in ms) to wait to reconnect. When the
+return value isn't a number, ioredis will stop trying to reconnect, and the connection
+will be lost forever if the user doesn't call `redis.connect()` manually.
+
+When reconnected, the client will auto subscribe to channels that the previous connection subscribed to.
+This behavior can be disabled by setting the `autoResubscribe` option to `false`.
+
+And if the previous connection has some unfulfilled commands (most likely blocking commands such as `brpop` and `blpop`),
+the client will resend them when reconnected. This behavior can be disabled by setting the `autoResendUnfulfilledCommands` option to `false`.
+
+### Reconnect on error
+
+Besides auto-reconnect when the connection is closed, ioredis supports reconnecting on the specified errors by the `reconnectOnError` option. Here's an example that will reconnect when receiving `READONLY` error:
+
+```javascript
+var redis = new Redis({
+  reconnectOnError: function (err) {
+    var targetError = 'READONLY';
+    if (err.message.slice(0, targetError.length) === targetError) {
+      // Only reconnect when the error starts with "READONLY"
+      return true; // or `return 1;`
+    }
+  }
+});
+```
+
+This feature is useful when using Amazon ElastiCache. Once failover happens, Amazon ElastiCache will switch the master we currently connected with to a slave, leading to the following writes fails with the error `READONLY`. Using `reconnectOnError`, we can force the connection to reconnect on this error in order to connect to the new master.
+
+Furthermore, if the `reconnectOnError` returns `2`, ioredis will resend the failed command after reconnecting.
+
+## Connection Events
+The Redis instance will emit some events about the state of the connection to the Redis server.
+
+Event    | Description
+:------------- | :-------------
+connect  | emits when a connection is established to the Redis server.
+ready    | If `enableReadyCheck` is `true`, client will emit `ready` when the server reports that it is ready to receive commands (e.g. finish loading data from disk).<br>Otherwise, `ready` will be emitted immediately right after the `connect` event.
+error    | emits when an error occurs while connecting.<br>However, ioredis emits all `error` events silently (only emits when there's at least one listener) so that your application won't crash if you're not listening to the `error` event.
+close    | emits when an established Redis server connection has closed.
+reconnecting | emits after `close` when a reconnection will be made. The argument of the event is the time (in ms) before reconnecting.
+end     | emits after `close` when no more reconnections will be made.
+
+You can also check out the `Redis#status` property to get the current connection status.
+
+Besides the above connection events, there are several other custom events:
+
+Event    | Description
+:------------- | :-------------
+authError | emits when the password specified in the options is wrong or the server doesn't require a password.
+select   | emits when the database changed. The argument is the new db number.
+
+## Offline Queue
+When a command can't be processed by Redis (being sent before the `ready` event), by default, it's added to the offline queue and will be
+executed when it can be processed. You can disable this feature by setting the `enableOfflineQueue`
+option to `false`:
+
+```javascript
+var redis = new Redis({ enableOfflineQueue: false });
+```
+
+## TLS Options
+Redis doesn't support TLS natively, however if the redis server you want to connect to is hosted behind a TLS proxy (e.g. [stunnel](https://www.stunnel.org/)) or is offered by a PaaS service that supports TLS connection (e.g. [Redis Labs](https://redislabs.com/)), you can set the `tls` option:
+
+```javascript
+var redis = new Redis({
+  host: 'localhost',
+  tls: {
+    // Refer to `tls.connect()` section in
+    // https://nodejs.org/api/tls.html
+    // for all supported options
+    ca: fs.readFileSync('cert.pem')
+  }
+});
+```
+
+<hr>
+
+## Sentinel
+ioredis supports Sentinel out of the box. It works transparently as all features that work when
+you connect to a single node also work when you connect to a sentinel group. Make sure to run Redis >= 2.8.12 if you want to use this feature.
+
+To connect using Sentinel, use:
+
+```javascript
+var redis = new Redis({
+  sentinels: [{ host: 'localhost', port: 26379 }, { host: 'localhost', port: 26380 }],
+  name: 'mymaster'
+});
+
+redis.set('foo', 'bar');
+```
+
+The arguments passed to the constructor are different from the ones you use to connect to a single node, where:
+
+* `name` identifies a group of Redis instances composed of a master and one or more slaves (`mymaster` in the example);
+* `sentinels` are a list of sentinels to connect to. The list does not need to enumerate all your sentinel instances, but a few so that if one is down the client will try the next one.
+
+ioredis **guarantees** that the node you connected to is always a master even after a failover. When a failover happens, instead of trying to reconnect to the failed node (which will be demoted to slave when it's available again), ioredis will ask sentinels for the new master node and connect to it. All commands sent during the failover are queued and will be executed when the new connection is established so that none of the commands will be lost.
+
+It's possible to connect to a slave instead of a master by specifying the option `role` with the value of `slave`, and ioredis will try to connect to a random slave of the specified master, with the guarantee that the connected node is always a slave. If the current node is promoted to master due to a failover, ioredis will disconnect from it and ask the sentinels for another slave node to connect to.
+
+Besides the `retryStrategy` option, there's also a `sentinelRetryStrategy` in Sentinel mode which will be invoked when all the sentinel nodes are unreachable during connecting. If `sentinelRetryStrategy` returns a valid delay time, ioredis will try to reconnect from scratch. The default value of `sentinelRetryStrategy` is:
+
+```javascript
+function (times) {
+  var delay = Math.min(times * 10, 1000);
+  return delay;
+}
+```
+
+## Cluster
+Redis Cluster provides a way to run a Redis installation where data is automatically sharded across multiple Redis nodes.
+You can connect to a Redis Cluster like this:
+
+```javascript
+var Redis = require('ioredis');
+
+var cluster = new Redis.Cluster([{
+  port: 6380,
+  host: '127.0.0.1'
+}, {
+  port: 6381,
+  host: '127.0.0.1'
+}]);
+
+cluster.set('foo', 'bar');
+cluster.get('foo', function (err, res) {
+  // res === 'bar'
+});
+```
+
+`Cluster` constructor accepts two arguments, where:
+
+0. The first argument is a list of nodes of the cluster you want to connect to.
+Just like Sentinel, the list does not need to enumerate all your cluster nodes,
+but a few so that if one is unreachable the client will try the next one, and the client will discover other nodes automatically when at least one node is connnected.
+0. The second argument is the options, where:
+
+    * `clusterRetryStrategy`: When none of the startup nodes are reachable, `clusterRetryStrategy` will be invoked. When a number is returned,
+    ioredis will try to reconnect to the startup nodes from scratch after the specified delay (in ms). Otherwise, an error of "None of startup nodes is available" will be returned.
+    The default value of this option is:
+
+        ```javascript
+        function (times) {
+          var delay = Math.min(100 + times * 2, 2000);
+          return delay;
+        }
+        ```
+    It' possible to modify the `startupNodes` property in order to switch to another set of nodes here:
+
+        ```javascript
+        function (times) {
+          this.startupNodes = [{ port: 6790, host: '127.0.0.1' }];
+          return Math.min(100 + times * 2, 2000);
+        }
+        ```
+
+    * `enableOfflineQueue`: Similar to the `enableOfflineQueue` option of `Redis` class.
+    * `enableReadyCheck`: When enabled, "ready" event will only be emitted when `CLUSTER INFO` command
+    reporting the cluster is ready for handling commands. Otherwise, it will be emitted immediately after "connect" is emitted.
+    * `scaleReads`: Config where to send the read queries. See below for more details.
+    * `maxRedirections`: When a cluster related error (e.g. `MOVED`, `ASK` and `CLUSTERDOWN` etc.) is received, the client will redirect the
+    command to another node. This option limits the max redirections allowed when sending a command. The default value is `16`.
+    * `retryDelayOnFailover`: If the target node is disconnected when sending a command,
+    ioredis will retry after the specified delay. The default value is `100`. You should make sure `retryDelayOnFailover * maxRedirections > cluster-node-timeout`
+    to insure that no command will fail during a failover.
+    * `retryDelayOnClusterDown`: When a cluster is down, all commands will be rejected with the error of `CLUSTERDOWN`. If this option is a number (by default, it is `100`), the client
+    will resend the commands after the specified time (in ms).
+    * `retryDelayOnTryAgain`: If this option is a number (by default, it is `100`), the client
+    will resend the commands rejected with `TRYAGAIN` error after the specified time (in ms).
+    * `redisOptions`: Default options passed to the constructor of `Redis` when connecting to a node.
+
+### Read-write splitting
+
+A typical redis cluster contains three or more masters and several slaves for each master. It's possible to scale out redis cluster by sending read queries to slaves and write queries to masters by setting the `scaleReads` option.
+
+`scaleReads` is "master" by default, which means ioredis will never send any queries to slaves. There are other three available options:
+
+1. "all": Send write queries to masters and read queries to masters or slaves randomly.
+2. "slave": Send write queries to masters and read queries to slaves.
+3. a custom `function(nodes, command): node`: Will choose the custom function to select to which node to send read queries (write queries keep being sent to master). The first node in `nodes` is always the master serving the relevant slots. If the function returns an array of nodes, a random node of that list will be selected.
+
+For example:
+
+```javascript
+var cluster = new Redis.Cluster([/* nodes */], {
+  scaleReads: 'slave'
+});
+cluster.set('foo', 'bar'); // This query will be sent to one of the masters.
+cluster.get('foo', function (err, res) {
+  // This query will be sent to one of the slaves.
+});
+```
+
+**NB** In the code snippet above, the `res` may not be equal to "bar" because of the lag of replication between the master and slaves.
+
+### Running commands to multiple nodes
+
+Every command will be sent to exactly one node. For commands containing keys, (e.g. `GET`, `SET` and `HGETALL`), ioredis sends them to the node that serving the keys, and for other commands not containing keys, (e.g. `INFO`, `KEYS` and `FLUSHDB`), ioredis sends them to a random node.
+
+Sometimes you may want to send a command to multiple nodes (masters or slaves) of the cluster, you can get the nodes via `Cluster#nodes()` method.
+
+`Cluster#nodes()` accepts a parameter role, which can be "master", "slave" and "all" (default), and returns an array of `Redis` instance. For example:
+
+```javascript
+// Send `FLUSHDB` command to all slaves:
+var slaves = cluster.nodes('slave');
+Promise.all(slaves.map(function (node) {
+  return node.flushdb();
+}));
+
+// Get keys of all the masters:
+var masters = cluster.nodes('master');
+Promise.all(masters.map(function (node) {
+  return node.keys();
+})).then(function (keys) {
+  // keys: [['key1', 'key2'], ['key3', 'key4']]
+});
+```
+
+### Transaction and pipeline in Cluster mode
+Almost all features that are supported by `Redis` are also supported by `Redis.Cluster`, e.g. custom commands, transaction and pipeline.
+However there are some differences when using transaction and pipeline in Cluster mode:
+
+0. All keys in a pipeline should belong to the same slot since ioredis sends all commands in a pipeline to the same node.
+0. You can't use `multi` without pipeline (aka `cluster.multi({ pipeline: false })`). This is because when you call `cluster.multi({ pipeline: false })`, ioredis doesn't know which node the `multi` command should be sent to.
+0. Chaining custom commands in the pipeline is not supported in Cluster mode.
+
+When any commands in a pipeline receives a `MOVED` or `ASK` error, ioredis will resend the whole pipeline to the specified node automatically if all of the following conditions are satisfied:
+
+0. All errors received in the pipeline are the same. For example, we won't resend the pipeline if we got two `MOVED` errors pointing to different nodes.
+0. All commands executed successfully are readonly commands. This makes sure that resending the pipeline won't have side effects.
+
+### Pub/Sub
+Pub/Sub in cluster mode works exactly as the same as in standalone mode. Internally, when a node of the cluster receives a message, it will broadcast the message to the other nodes. ioredis makes sure that each message will only be received once by strictly subscribing one node at the same time.
+
+```javascript
+var nodes = [/* nodes */];
+var pub = new Redis.Cluster(nodes);
+var sub = new Redis.Cluster(nodes);
+sub.on('message', function (channel, message) {
+  console.log(channel, message);
+});
+
+sub.subscribe('news', function () {
+  pub.publish('news', 'highlights');
+});
+```
+
+### Events
+
+Event    | Description
+:------------- | :-------------
+connect  | emits when a connection is established to the Redis server.
+ready    | emits when `CLUSTER INFO` reporting the cluster is able to receive commands (if `enableReadyCheck` is `true`) or immediately after `connect` event (if `enableReadyCheck` is false).
+error    | emits when an error occurs while connecting with a property of `lastNodeError` representing the last node error received. This event is emitted silently (only emitting if there's at least one listener).
+close    | emits when an established Redis server connection has closed.
+reconnecting | emits after `close` when a reconnection will be made. The argument of the event is the time (in ms) before reconnecting.
+end     | emits after `close` when no more reconnections will be made.
++node   | emits when a new node is connected.
+-node   | emits when a node is disconnected.
+node error | emits when an error occurs when connecting to a node
+
+### Password
+Setting the `password` option to access password-proctected clusters:
+
+```javascript
+var Redis = require('ioredis');
+var cluster = new Redis.Cluster(nodes, {
+  redisOptions: {
+    password: 'your-cluster-password'
+  }
+});
+```
+
+If some of nodes in the cluster using a different password, you should specify them in the first parameter:
+
+```javascript
+var Redis = require('ioredis');
+var cluster = new Redis.Cluster([
+  // Use password "password-for-30001" for 30001
+  { port: 30001, password: 'password-for-30001'},
+  // Don't use password when accessing 30002
+  { port: 30002, password: null }
+  // Other nodes will use "fallback-password"
+], {
+  redisOptions: {
+    password: 'fallback-password'
+  }
+});
+```
+
+## Native Parser
+If [hiredis](https://github.com/redis/hiredis-node) is installed (by `npm install hiredis`),
+ioredis will use it by default. Otherwise, a pure JavaScript parser will be used.
+Typically, there's not much difference between them in terms of performance.
+
+<hr>
+
